@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>EV-Log Volunteer</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    * { box-sizing: border-box; font-family: system-ui, -apple-system, 'Segoe UI', Roboto; }
+    body { margin: 0; padding: 20px; background: #f5f7fb; }
+    .container { max-width: 500px; margin: 0 auto; background: white; border-radius: 32px; padding: 24px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }
+    h1 { font-size: 1.8rem; margin-bottom: 0.25rem; }
+    .status { background: #eef2ff; padding: 12px; border-radius: 24px; margin-bottom: 20px; text-align: center; }
+    button, .qr-btn { background: #2563eb; color: white; border: none; padding: 12px 24px; border-radius: 40px; font-size: 1rem; width: 100%; margin: 8px 0; cursor: pointer; }
+    button.secondary { background: #64748b; }
+    input, select { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #cbd5e1; border-radius: 24px; }
+    .work-log { background: #f1f5f9; border-radius: 20px; padding: 12px; margin-top: 20px; }
+    .hidden { display: none; }
+    #qr-reader { width: 100%; margin-top: 10px; }
+  </style>
+  <!-- Include QR scanner library -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <!-- Supabase client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+<div class="container" id="app">
+  <h1>📋 EV-Log</h1>
+  <div id="auth-section">
+    <h2>Sign In</h2>
+    <input type="email" id="email" placeholder="Email" />
+    <input type="password" id="password" placeholder="Password" />
+    <button id="signin-btn">Login / Sign Up</button>
+  </div>
+
+  <div id="dashboard-section" class="hidden">
+    <div class="status" id="shift-status">Loading...</div>
+    <button id="signinout-btn">🔄 Tap/Scan to Sign In/Out</button>
+    <button id="qr-scanner-btn" class="secondary">📷 Scan QR Code</button>
+    <div id="qr-reader" class="hidden"></div>
+    <div class="work-log">
+      <strong>Today’s shifts</strong>
+      <div id="today-shifts">No sign‑ins today</div>
+    </div>
+    <hr />
+    <button id="chat-btn" class="secondary">💬 Chat with Manager</button>
+    <button id="news-btn" class="secondary">📰 News Feed</button>
+    <button id="profile-btn" class="secondary">👤 My Profile</button>
+    <button id="signout-app-btn" class="secondary">🚪 Sign Out</button>
+  </div>
+</div>
+
+<script>
+ 
+import { createClient } from '@supabase/supabase-js'
+const supabaseUrl = 'https://sfalbntbskfkbjsnltor.supabase.co'
+const supabaseKey = process.env.SUPABASE_KEY
+const supabase = createClient(supabaseUrl, supabaseKey)
+  let currentUser = null;
+  let currentVolunteer = null;
+  let activeShiftId = null; // current open shift if signed in
+
+  // DOM elements
+  const authSection = document.getElementById('auth-section');
+  const dashboard = document.getElementById('dashboard-section');
+  const signinBtn = document.getElementById('signin-btn');
+  const signinoutBtn = document.getElementById('signinout-btn');
+  const qrScannerBtn = document.getElementById('qr-scanner-btn');
+  const qrReaderDiv = document.getElementById('qr-reader');
+  const shiftStatusDiv = document.getElementById('shift-status');
+  const todayShiftsDiv = document.getElementById('today-shifts');
+
+  // Helper: check current open shift
+  async function fetchActiveShift() {
+    if (!currentVolunteer) return;
+    const { data, error } = await supabase
+      .from('shifts')
+      .select('*')
+      .eq('volunteer_id', currentVolunteer.id)
+      .is('sign_out_time', null)
+      .maybeSingle();
+    if (error) console.error(error);
+    activeShiftId = data ? data.id : null;
+    if (activeShiftId) {
+      shiftStatusDiv.innerText = `✅ Signed IN since ${new Date(data.sign_in_time).toLocaleTimeString()}`;
+      signinoutBtn.innerText = '🔴 Tap/Scan to Sign Out';
+    } else {
+      shiftStatusDiv.innerText = `❌ Currently signed OUT`;
+      signinoutBtn.innerText = '🟢 Tap/Scan to Sign In';
+    }
+    // load today's shift history
+    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
+    const { data: todayShifts } = await supabase
+      .from('shifts')
+      .select('*')
+      .eq('volunteer_id', currentVolunteer.id)
+      .gte('sign_in_time', todayStart.toISOString());
+    if (todayShifts && todayShifts.length) {
+      todayShiftsDiv.innerHTML = todayShifts.map(s => `${new Date(s.sign_in_time).toLocaleTimeString()} → ${s.sign_out_time ? new Date(s.sign_out_time).toLocaleTimeString() : 'active'}`).join('<br>');
+    } else {
+      todayShiftsDiv.innerHTML = 'No sign‑ins today';
+    }
+  }
+
+  // Sign in / out action
+  async function toggleSignInOut() {
+    if (!currentVolunteer) return;
+    if (activeShiftId) {
+      // sign out
+      const { error } = await supabase
+        .from('shifts')
+        .update({ sign_out_time: new Date().toISOString() })
+        .eq('id', activeShiftId);
+      if (!error) {
+        await fetchActiveShift();
+        // send email notification to manager (handled by supabase edge function later)
+        alert('Signed out successfully. Manager notified.');
+      } else { alert('Error signing out'); }
+    } else {
+      // sign in
+      const { data, error } = await supabase
+        .from('shifts')
+        .insert([{ volunteer_id: currentVolunteer.id, sign_in_time: new Date().toISOString() }])
+        .select();
+      if (!error) {
+        await fetchActiveShift();
+        alert('Signed in successfully.');
+      } else { alert('Error signing in'); }
+    }
+  }
+
+  // QR Code scanning
+  let html5QrCode = null;
+  async function startQRScanner() {
+    qrReaderDiv.classList.remove('hidden');
+    html5QrCode = new Html5Qrcode("qr-reader");
+    try {
+      await html5QrCode.start({ facingMode: "environment" }, {
+        fps: 10,
+        qrbox: { width: 250, height: 250 }
+      }, (decodedText) => {
+        // decodedText should be the volunteer's unique code
+        html5QrCode.stop().then(() => qrReaderDiv.classList.add('hidden'));
+        processQRCheck(decodedText);
+      });
+    } catch(err) { console.error(err); alert("Camera access needed for QR"); }
+  }
+
+  async function processQRCheck(code) {
+    // find volunteer by unique_volunteer_code
+    const { data: volunteer, error } = await supabase
+      .from('volunteers')
+      .select('*')
+      .eq('unique_volunteer_code', code)
+      .single();
+    if (error || !volunteer) { alert('Invalid QR code'); return; }
+    if (volunteer.id !== currentVolunteer.id) { alert('That QR code belongs to another volunteer'); return; }
+    // same as toggle sign in/out
+    toggleSignInOut();
+  }
+
+  // Auth: signup or login
+  signinBtn.onclick = async () => {
+    const email = document.getElementById('email').value;
+    const password = document.getElementById('password').value;
+    // try sign in
+    let { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error && error.message.includes('Invalid login')) {
+      // sign up
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({ email, password });
+      if (signUpError) { alert(signUpError.message); return; }
+      alert('Account created! Please wait for manager to assign you a volunteer profile.');
+      return;
+    } else if (error) { alert(error.message); return; }
+    currentUser = data.user;
+    // fetch volunteer record
+    const { data: volData } = await supabase.from('volunteers').select('*').eq('email', email).maybeSingle();
+    if (!volData) {
+      alert('Your email is not yet registered as a volunteer. Contact manager.');
+      await supabase.auth.signOut();
+      return;
+    }
+    currentVolunteer = volData;
+    authSection.classList.add('hidden');
+    dashboard.classList.remove('hidden');
+    await fetchActiveShift();
+  };
+
+  signinoutBtn.onclick = toggleSignInOut;
+  qrScannerBtn.onclick = () => startQRScanner();
+
+  document.getElementById('signout-app-btn').onclick = async () => {
+    await supabase.auth.signOut();
+    location.reload();
+  };
+</script>
+</body>
+</html>
